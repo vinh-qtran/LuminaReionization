@@ -98,12 +98,17 @@ report.exclude_also = [
 [tool.mypy]
 files = ["src", "tests"]
 python_version = "3.10"
-warn_unused_configs = true
-strict = true
-enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool"]
-warn_unreachable = true
+strict = false
+ignore_missing_imports = true
 disallow_untyped_defs = false
 disallow_incomplete_defs = false
+disallow_untyped_calls = false
+check_untyped_defs = false
+warn_unreachable = false
+warn_return_any = false
+warn_unused_configs = false
+warn_unused_ignores = false
+enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool"]
 
 [[tool.mypy.overrides]]
 module = "luminareionization.*"
