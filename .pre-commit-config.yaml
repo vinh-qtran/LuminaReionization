@@ -54,7 +54,11 @@ repos:
     hooks:
       - id: mypy
         files: src|tests|noxfile.py
-        args: []
+        args:
+          [
+            "--config-file=pyproject.toml",
+            "--disable-error-code=no-untyped-def",
+          ]
         additional_dependencies:
           - nox
           - pytest
