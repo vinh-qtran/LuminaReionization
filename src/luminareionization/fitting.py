@@ -166,3 +166,64 @@ class BaseFitter:
             params = self.fit()["params"]
 
         return x, self._get_model(x, params)
+
+
+class BiasFactorFitter(BaseFitter):
+    def __init__(self, k_bins, b_bins, r_bins, initial_guess=None):
+        """
+        Initialize the BiasFactorFitter with the k values, bias factor values, and correlation function values.
+
+        Parameters:
+        ----------
+        k_bins: array-like
+            Array of k values (independent variable).
+        b_bins: array-like
+            Array of bias factor values (dependent variable).
+        r_bins: array-like
+            Array of correlation function values (served as weights for the fit).
+        initial_guess: array-like, optional
+            Initial guess for the model parameters [k0, alpha]. If None, a default initial guess will be used.
+        """
+
+        self._initial_guess = initial_guess
+
+        super().__init__(x=k_bins, y=b_bins, w=r_bins)
+
+    def _get_model(self, x, params):
+        """
+        Get the model predictions for the bias factor.
+
+        Parameters:
+        ----------
+        x: array-like
+            Independent variable data (k values).
+        params: array-like
+            Model parameters [k0, alpha].
+
+        Returns:
+        -------
+        yhat: array-like
+            Model predictions for the bias factor.
+        """
+
+        b0 = 0.593
+        beta = 2
+
+        k0, alpha = params
+
+        return b0 / (1 + (x / k0) ** beta) ** (alpha / beta)
+
+    def _get_initial_guess(self):
+        """
+        Get the initial guess for the model parameters.
+
+        Returns:
+        -------
+        initial_guess: array-like
+            Initial guess for the model parameters [k0, alpha].
+        """
+
+        if self._initial_guess is not None:
+            return self._initial_guess
+
+        return np.array([0.2, 1])
