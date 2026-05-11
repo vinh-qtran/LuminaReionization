@@ -1,7 +1,69 @@
 import json
+import os
 
 import h5py
 import numpy as np
+import pyfftw
+from numba import njit, prange
+
+pyfftw.interfaces.cache.enable()
+pyfftw.interfaces.cache.set_keepalive_time(60)
+
+
+@njit(parallel=True)
+def _accumulate_bins(k_mag_flat, cov_k_flat, shot_flat, k_bins, n_bins, do_shot):
+    """
+    Accumulate the covariance and shot noise values into the specified wavenumber bins.
+
+    Parameters:
+    ----------
+    k_mag_flat: 1D array
+        Flattened array of the magnitudes of the wavevectors corresponding to each Fourier mode.
+    cov_k_flat: 1D array
+        Flattened array of the covariance values (real part of the product of the Fourier transforms) corresponding to each Fourier mode.
+    shot_flat: 1D array
+        Flattened array of the shot noise correction values corresponding to each Fourier mode, calculated from the shot noise kernel if provided.
+    k_bins: 1D array
+        Array of the edges of the wavenumber bins to accumulate the values into.
+    n_bins: int
+        Number of wavenumber bins, which should be equal to len(k_bins) - 1.
+    do_shot: bool
+        Whether to accumulate the shot noise correction values. This should be True if a shot noise kernel was provided and the power spectrum being calculated is an auto-power spectrum (i.e., delta_k_2 is None), and False otherwise.
+
+    Returns:
+    -------
+    counts: 1D array
+        Array of the counts of Fourier modes that fall into each wavenumber bin.
+    sum_cov: 1D array
+        Array of the sums of the covariance values for the Fourier modes that fall into each wavenumber bin.
+    sum_shot: 1D array
+        Array of the sums of the shot noise correction values for the Fourier modes that fall into each wavenumber bin. This will be an array of zeros if do_shot is False.
+    """
+
+    counts = np.zeros(n_bins)
+    sum_cov = np.zeros(n_bins)
+    sum_shot = np.zeros(n_bins)
+
+    for i in prange(len(k_mag_flat)):
+        k = k_mag_flat[i]
+
+        # Binary search
+        lo, hi = 0, n_bins
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if k_bins[mid] < k:
+                lo = mid + 1
+            else:
+                hi = mid
+        b = lo - 1
+
+        if 0 <= b < n_bins:
+            counts[b] += 1
+            sum_cov[b] += cov_k_flat[i]
+            if do_shot:
+                sum_shot[b] += shot_flat[i]
+
+    return counts, sum_cov, sum_shot
 
 
 class FourierTransform:
@@ -9,7 +71,9 @@ class FourierTransform:
     Class for performing Fourier transform and calculating power spectrum from a 3D field.
     """
 
-    def __init__(self, N_cell, L_box, N_part):
+    def __init__(
+        self, N_cell, L_box, N_part, n_threads=None, fftw_effort="FFTW_MEASURE"
+    ):
         """
         Initialize the Fourier transform with the field, number of cells, and box size.
 
@@ -21,6 +85,10 @@ class FourierTransform:
             Size of the box in real space.
         N_part: int
             Total number of particles in the simulation.
+        n_threads: int, optional
+            Number of threads to use for the FFTW library. If None, it will use the number of CPU cores available. The default value is None.
+        fftw_effort: str, optional
+            Effort level for the FFTW library, which determines the amount of time spent optimizing the FFT plan. The default value is "FFTW_MEASURE". The available options are "FFTW_ESTIMATE", "FFTW_MEASURE", "FFTW_PATIENT", and "FFTW_EXHAUSTIVE", with increasing levels of optimization and time spent on planning.
         """
 
         self._N_cell = N_cell
@@ -29,6 +97,10 @@ class FourierTransform:
         self._dx, self._k_min, self._k_max, self._P_shot = self._get_basic_params(
             N_cell, L_box, N_part
         )
+
+        self._n_threads = n_threads or os.cpu_count()
+        self._fftw_effort = fftw_effort
+        self._fftw_forward, self._fftw_inverse = self._build_fftw_plans()
 
     def _get_basic_params(self, N_cell, L_box, N_part):
         """
@@ -63,66 +135,46 @@ class FourierTransform:
 
         return dx, k_min, k_max, P_shot
 
-    def get_conv_kernels(self, p=2):
+    def _build_fftw_plans(self):
         """
-        Get the convolution kernels for the Fourier transform, which includes both the shot noise correction and the deconvolution kernel for the mass assignment scheme.
-
-        Parameters:
-        ----------
-        p: int, optional
-            Order of the mass assignment scheme. The deconvolution kernel will be calculated as the sinc function raised to the power of p for each dimension. The default value is 2, corresponding to the Cloud-in-Cell (CIC) mass assignment scheme.
+        Build the FFTW plans for the forward and inverse Fourier transforms. The forward transform will be a real-to-complex transform, while the inverse transform will be a complex-to-real transform. The plans will be created with the specified number of threads and effort level for optimization.
 
         Returns:
         -------
-        shot_noise_kernel: 3D array
-            Shot noise correction kernel in Fourier space following Jing (2005), calculated as the product of the single-shot noise kernels for each dimension.
-        deconv_kernel: 3D array
-            Deconvolution kernel in Fourier space, calculated as the product of the single-dimension deconvolution kernels for each dimension.
+        forward: pyfftw.FFTW object
+            FFTW plan for the forward Fourier transform, which takes a real-valued 3D array as input and produces a complex-valued 3D array in Fourier space.
+        inverse: pyfftw.FFTW object
+            FFTW plan for the inverse Fourier transform, which takes a complex-valued 3D array in Fourier space as input and produces a real-valued 3D array in real space. The inverse transform will be normalized by 1/N to match the normalization convention used by numpy's FFT functions.
         """
 
-        _k_1d = np.fft.fftfreq(self._N_cell, d=self._dx) * 2 * np.pi
+        _N = self._N_cell
 
-        _kx = _k_1d[:, None, None]
-        _ky = _k_1d[None, :, None]
-        _kz = _k_1d[None, None, :]
+        _in = pyfftw.empty_aligned((_N, _N, _N), dtype="float64")
+        _out = pyfftw.empty_aligned((_N, _N, _N // 2 + 1), dtype="complex128")
 
-        def _single_shot_noise_kernel(k_1d):
-            return 1 - 2 / 3 * np.sin(k_1d * self._dx / 2) ** 2
-
-        shot_noise_kernel = (
-            _single_shot_noise_kernel(_kx)
-            * _single_shot_noise_kernel(_ky)
-            * _single_shot_noise_kernel(_kz)
+        forward = pyfftw.FFTW(
+            _in,
+            _out,
+            axes=(0, 1, 2),
+            direction="FFTW_FORWARD",
+            flags=(self._fftw_effort,),
+            threads=self._n_threads,
         )
 
-        def _single_deconv_kernel(k_1d):
-            return np.sinc(k_1d * self._dx / (2 * np.pi)) ** p
+        _in_inv = pyfftw.empty_aligned((_N, _N, _N // 2 + 1), dtype="complex128")
+        _out_inv = pyfftw.empty_aligned((_N, _N, _N), dtype="float64")
 
-        deconv_kernel = (
-            _single_deconv_kernel(_kx)
-            * _single_deconv_kernel(_ky)
-            * _single_deconv_kernel(_kz)
+        inverse = pyfftw.FFTW(
+            _in_inv,
+            _out_inv,
+            axes=(0, 1, 2),
+            direction="FFTW_BACKWARD",
+            flags=(self._fftw_effort,),
+            threads=self._n_threads,
+            normalise_idft=True,
         )
 
-        return shot_noise_kernel, deconv_kernel
-
-    def save_conv_kernels(self, shot_noise_kernel, deconv_kernel, filename):
-        """
-        Save the convolution kernels to an HDF5 file.
-
-        Parameters:
-        ----------
-        shot_noise_kernel: 3D array
-            Shot noise correction kernel in Fourier space.
-        deconv_kernel: 3D array
-            Deconvolution kernel in Fourier space.
-        filename: str
-            Name of the HDF5 file to save the kernels to.
-        """
-
-        with h5py.File(filename, "w") as f:
-            f.create_dataset("ShotNoiseKernel", data=shot_noise_kernel)
-            f.create_dataset("DeconvKernel", data=deconv_kernel)
+        return forward, inverse
 
     def get_fourier_transform(self, delta_x):
         """
@@ -141,13 +193,17 @@ class FourierTransform:
             Fourier transform of the input field.
         """
 
-        delta_k = np.fft.fftn(delta_x)
+        self._fftw_forward.input_array[:] = delta_x
+        self._fftw_forward()
+
+        delta_k = self._fftw_forward.output_array.copy()
 
         _k_1d = np.fft.fftfreq(self._N_cell, d=self._dx) * 2 * np.pi
+        _kz_1d = np.fft.rfftfreq(self._N_cell, d=self._dx) * 2 * np.pi
 
         _kx = _k_1d[:, None, None]
         _ky = _k_1d[None, :, None]
-        _kz = _k_1d[None, None, :]
+        _kz = _kz_1d[None, None, :]
 
         k_mag = np.sqrt(_kx**2 + _ky**2 + _kz**2)
 
@@ -189,7 +245,72 @@ class FourierTransform:
             Field in real space obtained from the inverse Fourier transform of the input Fourier transform.
         """
 
-        return np.fft.ifftn(delta_k).real
+        self._fftw_inverse.input_array[:] = delta_k
+        self._fftw_inverse()
+
+        return self._fftw_inverse.output_array.copy()
+
+    def get_conv_kernels(self, p=2):
+        """
+        Get the convolution kernels for the Fourier transform, which includes both the shot noise correction and the deconvolution kernel for the mass assignment scheme.
+
+        Parameters:
+        ----------
+        p: int, optional
+            Order of the mass assignment scheme. The deconvolution kernel will be calculated as the sinc function raised to the power of p for each dimension. The default value is 2, corresponding to the Cloud-in-Cell (CIC) mass assignment scheme.
+
+        Returns:
+        -------
+        shot_noise_kernel: 3D array
+            Shot noise correction kernel in Fourier space following Jing (2005), calculated as the product of the single-shot noise kernels for each dimension.
+        deconv_kernel: 3D array
+            Deconvolution kernel in Fourier space, calculated as the product of the single-dimension deconvolution kernels for each dimension.
+        """
+
+        _k_1d = np.fft.fftfreq(self._N_cell, d=self._dx) * 2 * np.pi
+        _kz_1d = np.fft.rfftfreq(self._N_cell, d=self._dx) * 2 * np.pi
+
+        _kx = _k_1d[:, None, None]
+        _ky = _k_1d[None, :, None]
+        _kz = _kz_1d[None, None, :]
+
+        def _single_shot_noise_kernel(k_1d):
+            return 1 - 2 / 3 * np.sin(k_1d * self._dx / 2) ** 2
+
+        shot_noise_kernel = (
+            _single_shot_noise_kernel(_kx)
+            * _single_shot_noise_kernel(_ky)
+            * _single_shot_noise_kernel(_kz)
+        )
+
+        def _single_deconv_kernel(k_1d):
+            return np.sinc(k_1d * self._dx / (2 * np.pi)) ** p
+
+        deconv_kernel = (
+            _single_deconv_kernel(_kx)
+            * _single_deconv_kernel(_ky)
+            * _single_deconv_kernel(_kz)
+        )
+
+        return shot_noise_kernel, deconv_kernel
+
+    def save_conv_kernels(self, shot_noise_kernel, deconv_kernel, filename):
+        """
+        Save the convolution kernels to an HDF5 file.
+
+        Parameters:
+        ----------
+        shot_noise_kernel: 3D array
+            Shot noise correction kernel in Fourier space.
+        deconv_kernel: 3D array
+            Deconvolution kernel in Fourier space.
+        filename: str
+            Name of the HDF5 file to save the kernels to.
+        """
+
+        with h5py.File(filename, "w") as f:
+            f.create_dataset("ShotNoiseKernel", data=shot_noise_kernel)
+            f.create_dataset("DeconvKernel", data=deconv_kernel)
 
     def get_power_spectrum(
         self,
@@ -234,32 +355,33 @@ class FourierTransform:
         _delta_k_1 = delta_k_1
         _delta_k_2 = delta_k_2 if delta_k_2 is not None else delta_k_1
 
-        _k_mag = k_mag.flatten()
-        _cov_k = np.real(_delta_k_1 * np.conj(_delta_k_2)).flatten()
+        _k_mag = np.ascontiguousarray(k_mag.ravel())
+        _cov_k = np.ascontiguousarray(np.real(_delta_k_1 * np.conj(_delta_k_2)).ravel())
+
+        _do_shot = shot_noise_kernel is not None and delta_k_2 is None
+        _shot_k = (
+            np.ascontiguousarray(shot_noise_kernel.ravel())
+            if shot_noise_kernel
+            else np.empty(0)
+        )
 
         _k_bins = np.logspace(np.log10(self._k_min), np.log10(self._k_max), n_k_bins)
         k_bin_centers = 0.5 * (_k_bins[:-1] + _k_bins[1:])
+        _n_bins = len(k_bin_centers)
 
-        _counts, _ = np.histogram(_k_mag, bins=_k_bins)
-        _sum_cov_k, _ = np.histogram(_k_mag, bins=_k_bins, weights=_cov_k)
+        _counts, _sum_cov_k, _sum_shot_k = _accumulate_bins(
+            _k_mag, _cov_k, _shot_k, _k_bins, _n_bins, _do_shot
+        )
 
         _mask = _counts > 0
         P_k_raw = np.zeros_like(k_bin_centers)
         P_k_raw[_mask] = _sum_cov_k[_mask] / _counts[_mask]
         P_k_raw *= (self._L_box**3) / (self._N_cell**6)
 
-        if shot_noise_kernel is not None and delta_k_2 is None:
-            _sum_shot_k, _ = np.histogram(
-                _k_mag, bins=_k_bins, weights=shot_noise_kernel.flatten()
-            )
-
-            _P_shot_k = np.zeros_like(k_bin_centers)
-            _P_shot_k[_mask] = _sum_shot_k[_mask] / _counts[_mask]
-            _P_shot_k *= self._P_shot
-
-            P_k = P_k_raw - _P_shot_k
-        else:
-            P_k = P_k_raw
+        _P_shot_k = np.zeros_like(k_bin_centers)
+        _P_shot_k[_mask] = _sum_shot_k[_mask] / _counts[_mask]
+        _P_shot_k *= self._P_shot
+        P_k = P_k_raw - _P_shot_k
 
         P_k_err = np.zeros_like(k_bin_centers)
         _P_k_11_raw = P_k_11_raw if P_k_11_raw is not None else P_k_raw
