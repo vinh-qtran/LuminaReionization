@@ -182,7 +182,7 @@ class BiasFactorFitter(BaseFitter):
         r_bins: array-like
             Array of correlation function values (served as weights for the fit).
         initial_guess: array-like, optional
-            Initial guess for the model parameters [k0, alpha]. If None, a default initial guess will be used.
+            Initial guess for the model parameters [b0, k0, alpha]. If None, a default initial guess will be used.
         """
 
         self._initial_guess = initial_guess
@@ -198,18 +198,16 @@ class BiasFactorFitter(BaseFitter):
         x: array-like
             Independent variable data (k values).
         params: array-like
-            Model parameters [k0, alpha].
+            Model parameters [b0, k0, alpha].
 
         Returns:
         -------
         yhat: array-like
             Model predictions for the bias factor.
         """
-
-        b0 = 0.593
         beta = 2
 
-        k0, alpha = params
+        b0, k0, alpha = params
 
         return b0 / (1 + (x / k0) ** beta) ** (alpha / beta)
 
@@ -220,10 +218,10 @@ class BiasFactorFitter(BaseFitter):
         Returns:
         -------
         initial_guess: array-like
-            Initial guess for the model parameters [k0, alpha].
+            Initial guess for the model parameters [b0, k0, alpha].
         """
 
         if self._initial_guess is not None:
             return self._initial_guess
 
-        return np.array([0.2, 1])
+        return np.array([1, 0.2, 1])

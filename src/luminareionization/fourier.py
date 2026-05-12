@@ -1,13 +1,11 @@
 import json
 import os
+import pickle
 
 import h5py
 import numpy as np
 import pyfftw
 from numba import njit, prange
-
-pyfftw.interfaces.cache.enable()
-pyfftw.interfaces.cache.set_keepalive_time(60)
 
 
 @njit(parallel=True)
@@ -47,7 +45,6 @@ def _accumulate_bins(k_mag_flat, cov_k_flat, shot_flat, k_bins, n_bins, do_shot)
     for i in prange(len(k_mag_flat)):
         k = k_mag_flat[i]
 
-        # Binary search
         lo, hi = 0, n_bins
         while lo < hi:
             mid = (lo + hi) // 2
@@ -66,14 +63,113 @@ def _accumulate_bins(k_mag_flat, cov_k_flat, shot_flat, k_bins, n_bins, do_shot)
     return counts, sum_cov, sum_shot
 
 
+class FFTWPlan:
+    def __init__(self, N_cell, n_threads=None, fftw_effort="FFTW_MEASURE"):
+        """
+        Initialize the FFTW plan with the number of cells, number of threads, and effort level for optimization.
+
+        Parameters:
+        ----------
+        N_cell: int
+            Number of cells in each dimension for the FFT grid.
+        n_threads: int, optional
+            Number of threads to use for the FFTW library. If None, it will use the number of CPU cores available. The default value is None.
+        fftw_effort: str, optional
+            Effort level for the FFTW library, which determines the amount of time spent optimizing the FFT plan. The default value is "FFTW_MEASURE". The available options are "FFTW_ESTIMATE", "FFTW_MEASURE", "FFTW_PATIENT", and "FFTW_EXHAUSTIVE", with increasing levels of optimization and time spent on planning.
+        """
+
+        self.N_cell = N_cell
+        self.n_threads = n_threads or os.cpu_count()
+        self.fftw_effort = fftw_effort
+
+    def build_forward_plan(self):
+        """
+        Build the FFTW plan for the forward Fourier transform. The input array will be a real-valued 3D array of shape (N_cell, N_cell, N_cell), and the output array will be a complex-valued 3D array of shape (N_cell, N_cell, N_cell//2 + 1) due to the use of the rfftn function for real-to-complex transforms.
+
+        Returns:
+        -------
+        fftw_forward: pyfftw.FFTW object
+            FFTW plan for the forward Fourier transform.
+        """
+
+        _in = pyfftw.empty_aligned(
+            (self.N_cell, self.N_cell, self.N_cell), dtype="float64"
+        )
+        _out = pyfftw.empty_aligned(
+            (self.N_cell, self.N_cell, self.N_cell // 2 + 1), dtype="complex128"
+        )
+
+        return pyfftw.FFTW(
+            _in,
+            _out,
+            axes=(0, 1, 2),
+            direction="FFTW_FORWARD",
+            flags=(self.fftw_effort,),
+            threads=self.n_threads,
+        )
+
+    def build_inverse_plan(self):
+        """
+        Build the FFTW plan for the inverse Fourier transform. The input array will be a complex-valued 3D array of shape (N_cell, N_cell, N_cell//2 + 1), and the output array will be a real-valued 3D array of shape (N_cell, N_cell, N_cell). The inverse transform will be normalized by 1/N to match the normalization convention used by numpy's FFT functions.
+
+        Returns:
+        -------
+        fftw_inverse: pyfftw.FFTW object
+            FFTW plan for the inverse Fourier transform, with normalization to match numpy's convention.
+        """
+
+        _in_inv = pyfftw.empty_aligned(
+            (self.N_cell, self.N_cell, self.N_cell // 2 + 1), dtype="complex128"
+        )
+        _out_inv = pyfftw.empty_aligned(
+            (self.N_cell, self.N_cell, self.N_cell), dtype="float64"
+        )
+
+        return pyfftw.FFTW(
+            _in_inv,
+            _out_inv,
+            axes=(0, 1, 2),
+            direction="FFTW_BACKWARD",
+            flags=(self.fftw_effort,),
+            threads=self.n_threads,
+            normalise_idft=True,
+        )
+
+    def save_wisdom(self, filename):
+        """
+        Save the FFTW wisdom containing the optimized plans for the FFTW library, which can be reused in future runs to speed up the planning phase of the Fourier transforms.
+
+        Parameters:
+        ----------
+        filename: str
+            Name of the pickle file to save the FFTW wisdom to.
+        """
+
+        wisdom = pyfftw.export_wisdom()
+        with open(filename, "wb") as f:  # noqa: PTH123
+            pickle.dump(wisdom, f)
+
+    def load_wisdom(self, filename):
+        """
+        Load the FFTW wisdom from a pickle file and import it into the FFTW library to reuse the optimized plans for the Fourier transforms.
+
+        Parameters:
+        ----------
+        filename: str
+            Name of the pickle file to load the FFTW wisdom from.
+        """
+
+        with open(filename, "rb") as f:  # noqa: PTH123
+            wisdom = pickle.load(f)
+        pyfftw.import_wisdom(wisdom)
+
+
 class FourierTransform:
     """
     Class for performing Fourier transform and calculating power spectrum from a 3D field.
     """
 
-    def __init__(
-        self, N_cell, L_box, N_part, n_threads=None, fftw_effort="FFTW_MEASURE"
-    ):
+    def __init__(self, N_cell, L_box, N_part, fftw_forward, fftw_inverse=None):
         """
         Initialize the Fourier transform with the field, number of cells, and box size.
 
@@ -85,10 +181,10 @@ class FourierTransform:
             Size of the box in real space.
         N_part: int
             Total number of particles in the simulation.
-        n_threads: int, optional
-            Number of threads to use for the FFTW library. If None, it will use the number of CPU cores available. The default value is None.
-        fftw_effort: str, optional
-            Effort level for the FFTW library, which determines the amount of time spent optimizing the FFT plan. The default value is "FFTW_MEASURE". The available options are "FFTW_ESTIMATE", "FFTW_MEASURE", "FFTW_PATIENT", and "FFTW_EXHAUSTIVE", with increasing levels of optimization and time spent on planning.
+        fftw_forward: pyfftw.FFTW
+            FFTW plan for the forward Fourier transform.
+        fftw_inverse: pyfftw.FFTW, optional
+            FFTW plan for the inverse Fourier transform. The default value is None, with which no inverse transform will be performed.
         """
 
         self._N_cell = N_cell
@@ -98,9 +194,8 @@ class FourierTransform:
             N_cell, L_box, N_part
         )
 
-        self._n_threads = n_threads or os.cpu_count()
-        self._fftw_effort = fftw_effort
-        self._fftw_forward, self._fftw_inverse = self._build_fftw_plans()
+        self._fftw_forward = fftw_forward
+        self._fftw_inverse = fftw_inverse
 
     def _get_basic_params(self, N_cell, L_box, N_part):
         """
@@ -134,47 +229,6 @@ class FourierTransform:
         P_shot = L_box**3 / N_part
 
         return dx, k_min, k_max, P_shot
-
-    def _build_fftw_plans(self):
-        """
-        Build the FFTW plans for the forward and inverse Fourier transforms. The forward transform will be a real-to-complex transform, while the inverse transform will be a complex-to-real transform. The plans will be created with the specified number of threads and effort level for optimization.
-
-        Returns:
-        -------
-        forward: pyfftw.FFTW object
-            FFTW plan for the forward Fourier transform, which takes a real-valued 3D array as input and produces a complex-valued 3D array in Fourier space.
-        inverse: pyfftw.FFTW object
-            FFTW plan for the inverse Fourier transform, which takes a complex-valued 3D array in Fourier space as input and produces a real-valued 3D array in real space. The inverse transform will be normalized by 1/N to match the normalization convention used by numpy's FFT functions.
-        """
-
-        _N = self._N_cell
-
-        _in = pyfftw.empty_aligned((_N, _N, _N), dtype="float64")
-        _out = pyfftw.empty_aligned((_N, _N, _N // 2 + 1), dtype="complex128")
-
-        forward = pyfftw.FFTW(
-            _in,
-            _out,
-            axes=(0, 1, 2),
-            direction="FFTW_FORWARD",
-            flags=(self._fftw_effort,),
-            threads=self._n_threads,
-        )
-
-        _in_inv = pyfftw.empty_aligned((_N, _N, _N // 2 + 1), dtype="complex128")
-        _out_inv = pyfftw.empty_aligned((_N, _N, _N), dtype="float64")
-
-        inverse = pyfftw.FFTW(
-            _in_inv,
-            _out_inv,
-            axes=(0, 1, 2),
-            direction="FFTW_BACKWARD",
-            flags=(self._fftw_effort,),
-            threads=self._n_threads,
-            normalise_idft=True,
-        )
-
-        return forward, inverse
 
     def get_fourier_transform(self, delta_x):
         """
@@ -244,6 +298,11 @@ class FourierTransform:
         delta_x: 3D array
             Field in real space obtained from the inverse Fourier transform of the input Fourier transform.
         """
+
+        if self._fftw_inverse is None:
+            raise ValueError(  # noqa: TRY003
+                "Inverse FFTW plan is not available. Please build the inverse plan first."  # noqa: EM101
+            )
 
         self._fftw_inverse.input_array[:] = delta_k
         self._fftw_inverse()
