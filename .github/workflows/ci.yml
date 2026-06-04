@@ -30,7 +30,7 @@ jobs:
         with:
           python-version: "3.x"
 
-      - uses: astral-sh/setup-uv@v8.1.0
+      - uses: astral-sh/setup-uv@v8.2.0
 
       - uses: j178/prek-action@v2
 
@@ -60,7 +60,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
           allow-prereleases: true
 
-      - uses: astral-sh/setup-uv@v8.1.0
+      - uses: astral-sh/setup-uv@v8.2.0
 
       - name: Install package
         run: uv sync
