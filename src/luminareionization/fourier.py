@@ -438,7 +438,7 @@ class FourierTransform:
         P_k_raw *= (self._L_box**3) / (self._N_cell**6)
 
         _P_shot_k = np.zeros_like(k_bin_centers)
-        _P_shot_k[_mask] = _sum_shot_k[_mask] / _counts[_mask]
+        _P_shot_k[_mask] = _sum_shot_k[_mask] / _counts[_mask] if _do_shot else 1
         _P_shot_k *= self._P_shot
         P_k = P_k_raw - _P_shot_k
 
