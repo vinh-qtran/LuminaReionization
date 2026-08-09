@@ -169,7 +169,7 @@ class BaseFitter:
 
 
 class BiasFactorFitter(BaseFitter):
-    def __init__(self, k_bins, b_bins, r_bins, initial_guess=None):
+    def __init__(self, k_bins, b_bins, r_bins, initial_guess=None, beta=2):
         """
         Initialize the BiasFactorFitter with the k values, bias factor values, and correlation function values.
 
@@ -186,6 +186,7 @@ class BiasFactorFitter(BaseFitter):
         """
 
         self._initial_guess = initial_guess
+        self._beta = beta
 
         super().__init__(x=k_bins, y=b_bins, w=r_bins)
 
@@ -205,11 +206,9 @@ class BiasFactorFitter(BaseFitter):
         yhat: array-like
             Model predictions for the bias factor.
         """
-        beta = 2
-
         b0, k0, alpha = params
 
-        return b0 / (1 + (x / k0) ** beta) ** (alpha / beta)
+        return b0 / (1 + (x / k0) ** self._beta) ** (alpha / self._beta)
 
     def _get_initial_guess(self):
         """

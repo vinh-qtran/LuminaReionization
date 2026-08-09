@@ -89,3 +89,42 @@ def get_rms_err(y, y_hat):
         err_sum += (1 - y_hat[i] / y[i]) ** 2
 
     return np.sqrt(err_sum / n)
+
+
+@njit(parallel=True)
+def get_z_reion_histogram(z_reion_flat, z_bins):
+    """
+    Compute the histogram of the reionization redshift field.
+
+    Parameters:
+    ----------
+    z_reion_flat: array
+        Flattened array of the reionization redshift values.
+    z_bins: array
+        Array of the edges of the redshift bins.
+
+    Returns:
+    -------
+    counts: array
+        Array of the counts of the reionization redshift field in each bin.
+    """
+
+    n_bins = len(z_bins) - 1
+    counts = np.zeros(n_bins)
+
+    for i in prange(z_reion_flat.size):
+        z = z_reion_flat[i]
+
+        lo, hi = 0, n_bins
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if z_bins[mid] < z:
+                lo = mid + 1
+            else:
+                hi = mid
+        b = lo - 1
+
+        if 0 <= b < n_bins:
+            counts[b] += 1
+
+    return counts
