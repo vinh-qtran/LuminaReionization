@@ -9,7 +9,7 @@ from numba import njit, prange
 
 
 @njit(parallel=True)
-def _accumulate_bins(k_mag_flat, cov_k_flat, shot_flat, k_bins, n_bins, do_shot):
+def _accumulate_bins(k_mag_flat, cov_k_flat, shot_flat, k_bins, do_shot):
     """
     Accumulate the covariance and shot noise values into the specified wavenumber bins.
 
@@ -23,8 +23,6 @@ def _accumulate_bins(k_mag_flat, cov_k_flat, shot_flat, k_bins, n_bins, do_shot)
         Flattened array of the shot noise correction values corresponding to each Fourier mode, calculated from the shot noise kernel if provided.
     k_bins: 1D array
         Array of the edges of the wavenumber bins to accumulate the values into.
-    n_bins: int
-        Number of wavenumber bins, which should be equal to len(k_bins) - 1.
     do_shot: bool
         Whether to accumulate the shot noise correction values. This should be True if a shot noise kernel was provided and the power spectrum being calculated is an auto-power spectrum (i.e., delta_k_2 is None), and False otherwise.
 
@@ -37,6 +35,8 @@ def _accumulate_bins(k_mag_flat, cov_k_flat, shot_flat, k_bins, n_bins, do_shot)
     sum_shot: 1D array
         Array of the sums of the shot noise correction values for the Fourier modes that fall into each wavenumber bin. This will be an array of zeros if do_shot is False.
     """
+
+    n_bins = len(k_bins) - 1
 
     counts = np.zeros(n_bins)
     sum_cov = np.zeros(n_bins)
@@ -426,10 +426,9 @@ class FourierTransform:
 
         _k_bins = np.logspace(np.log10(self._k_min), np.log10(self._k_max), n_k_bins)
         k_bin_centers = 0.5 * (_k_bins[:-1] + _k_bins[1:])
-        _n_bins = len(k_bin_centers)
 
         _counts, _sum_cov_k, _sum_shot_k = _accumulate_bins(
-            _k_mag, _cov_k, _shot_k, _k_bins, _n_bins, _do_shot
+            _k_mag, _cov_k, _shot_k, _k_bins, _do_shot
         )
 
         _mask = _counts > 0
