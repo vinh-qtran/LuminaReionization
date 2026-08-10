@@ -128,3 +128,30 @@ def get_z_reion_histogram(z_reion_flat, z_bins):
             counts[b] += 1
 
     return counts
+
+
+def get_reionization_width(x_e_bins, z_bins):
+    """
+    Get the width of the reionization epoch based on the ionization fraction and redshift bins.
+
+    Parameters:
+    ----------
+    x_e_bins: array
+        Array of the ionization fraction values.
+    z_bins: array
+        Array of the redshift bins.
+
+    Returns:
+    -------
+    z_width_25: float
+        Width of the reionization epoch at 25% and 75% ionization fraction.
+    z_width_5: float
+        Width of the reionization epoch at 5% and 95% ionization fraction.
+    """
+
+    inv_x_e_interp = get_interp(z_bins, x_e_bins)
+
+    z_width_25 = inv_x_e_interp(0.25) - inv_x_e_interp(0.75)
+    z_width_5 = inv_x_e_interp(0.05) - inv_x_e_interp(0.95)
+
+    return z_width_25, z_width_5
