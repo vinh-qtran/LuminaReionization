@@ -151,7 +151,7 @@ def get_reionization_width(x_e_bins, z_bins):
         Width of the reionization epoch at 5% and 95% ionization fraction.
     """
 
-    inv_x_e_interp = get_interp(z_bins, x_e_bins)
+    inv_x_e_interp = get_interp(x_e_bins, z_bins)
 
     z_width_25 = inv_x_e_interp(0.25) - inv_x_e_interp(0.75)
     z_width_5 = inv_x_e_interp(0.05) - inv_x_e_interp(0.95)
