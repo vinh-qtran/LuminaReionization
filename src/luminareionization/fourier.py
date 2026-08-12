@@ -309,7 +309,7 @@ class FourierTransform:
 
         return self._fftw_inverse.output_array.copy()
 
-    def get_conv_kernels(self, p=2):
+    def get_conv_kernels(self, p=2, dx=None):
         """
         Get the convolution kernels for the Fourier transform, which includes both the shot noise correction and the deconvolution kernel for the mass assignment scheme.
 
@@ -317,14 +317,19 @@ class FourierTransform:
         ----------
         p: int, optional
             Order of the mass assignment scheme. The deconvolution kernel will be calculated as the sinc function raised to the power of p for each dimension. The default value is 2, corresponding to the Cloud-in-Cell (CIC) mass assignment scheme.
+        dx: float, optional
+            Grid spacing in real space. If None, it will be taken from the instance's dx attribute. The default value is None.
 
         Returns:
         -------
-        shot_noise_kernel: 3D array
-            Shot noise correction kernel in Fourier space following Jing (2005), calculated as the product of the single-shot noise kernels for each dimension.
-        deconv_kernel: 3D array
-            Deconvolution kernel in Fourier space, calculated as the product of the single-dimension deconvolution kernels for each dimension.
+        conv_kernel: 3D array
+            Convolution kernel in Fourier space, calculated as the product of the single-dimension convolution kernels for each dimension, which is the sinc function raised to the power of p.
+        # shot_noise_kernel: 3D array
+        #     Shot noise correction kernel in Fourier space following Jing (2005), calculated as the product of the single-shot noise kernels for each dimension.
+        # deconv_kernel: 3D array
+        #     Deconvolution kernel in Fourier space, calculated as the product of the single-dimension deconvolution kernels for each dimension.
         """
+        _dx = dx or self._dx
 
         _k_1d = np.fft.fftfreq(self._N_cell, d=self._dx) * 2 * np.pi
         _kz_1d = np.fft.rfftfreq(self._N_cell, d=self._dx) * 2 * np.pi
@@ -333,43 +338,47 @@ class FourierTransform:
         _ky = _k_1d[None, :, None]
         _kz = _kz_1d[None, None, :]
 
-        def _single_shot_noise_kernel(k_1d):
-            return 1 - 2 / 3 * np.sin(k_1d * self._dx / 2) ** 2
+        # def _single_shot_noise_kernel(k_1d):
+        #     return 1 - 2 / 3 * np.sin(k_1d * self._dx / 2) ** 2
 
-        shot_noise_kernel = (
-            _single_shot_noise_kernel(_kx)
-            * _single_shot_noise_kernel(_ky)
-            * _single_shot_noise_kernel(_kz)
-        )
+        # shot_noise_kernel = (
+        #     _single_shot_noise_kernel(_kx)
+        #     * _single_shot_noise_kernel(_ky)
+        #     * _single_shot_noise_kernel(_kz)
+        # )
 
-        def _single_deconv_kernel(k_1d):
-            return np.sinc(k_1d * self._dx / (2 * np.pi)) ** p
+        def _single_conv_kernel(k_1d):
+            return np.sinc(k_1d * _dx / (2 * np.pi)) ** p
 
-        deconv_kernel = (
-            _single_deconv_kernel(_kx)
-            * _single_deconv_kernel(_ky)
-            * _single_deconv_kernel(_kz)
-        )
+        return (
+            _single_conv_kernel(_kx)
+            * _single_conv_kernel(_ky)
+            * _single_conv_kernel(_kz)
+        ).reshape(self._N_cell, self._N_cell, self._N_cell // 2 + 1)
 
-        return shot_noise_kernel, deconv_kernel
+        # return shot_noise_kernel, deconv_kernel
 
-    def save_conv_kernels(self, shot_noise_kernel, deconv_kernel, filename):
+    def save_conv_kernels(
+        self, conv_kernel, filename
+    ):  # shot_noise_kernel, deconv_kernel, filename):
         """
         Save the convolution kernels to an HDF5 file.
 
         Parameters:
         ----------
-        shot_noise_kernel: 3D array
-            Shot noise correction kernel in Fourier space.
-        deconv_kernel: 3D array
-            Deconvolution kernel in Fourier space.
+        conv_kernel: 3D array
+            Convolution kernel in Fourier space, calculated as the product of the single-dimension convolution kernels for each dimension, which is the sinc function raised to the power of p.
         filename: str
             Name of the HDF5 file to save the kernels to.
+        # shot_noise_kernel: 3D array
+        #     Shot noise correction kernel in Fourier space.
+        # deconv_kernel: 3D array
+        #     Deconvolution kernel in Fourier space.
         """
 
         with h5py.File(filename, "w") as f:
-            f.create_dataset("ShotNoiseKernel", data=shot_noise_kernel)
-            f.create_dataset("DeconvKernel", data=deconv_kernel)
+            # f.create_dataset("ShotNoiseKernel", data=shot_noise_kernel)
+            f.create_dataset("ConvKernel", data=conv_kernel)
 
     def get_power_spectrum(
         self,
