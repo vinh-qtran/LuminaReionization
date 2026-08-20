@@ -348,7 +348,7 @@ class FourierTransform:
         # )
 
         def _single_conv_kernel(k_1d):
-            return np.sinc(k_1d * _dx / (2 * np.pi)) ** p
+            return np.sinc(k_1d * _dx / 2) ** p
 
         return (
             _single_conv_kernel(_kx)
